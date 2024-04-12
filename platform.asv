@@ -34,7 +34,7 @@ classdef platform < handle
         posIndex uint16
         lidarIndex uint16
         errIndex uint8
-        estIndex uint16
+        
         
         
         activeLidar uint8
@@ -71,8 +71,6 @@ classdef platform < handle
             
             % initialising remaining fields
             obj.positionRegister = zeros(4, 4096);
-            obj.estimateRegister = zeros(4, 2048);
-            obj.estIndex = 1;
             obj.positionRegister(:,1) = [parameters.position; 0];
             obj.posIndex = 1;
             obj.lidarIndex = 0;
@@ -320,10 +318,10 @@ classdef platform < handle
             % generate localised estimate and store
             if ~(isempty(obj.localiseMatrix))
                 
-                obj.estimateRegister(:,obj.estIndex) = [
+                test = [
                     platform.localToGlobalCF(obj.localiseMatrix(1:2), obj.localiseMatrix(3), obj.currentPose(1:2));
                     obj.localiseMatrix(3); eventData.t];
-                obj.estIndex = obj.estIndex+1;
+                t2 = obj.estimateRegister(obj.posIndex);
             end
             
         end
