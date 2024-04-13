@@ -10,6 +10,8 @@ classdef platform < handle
         
         params struct
         
+        ekf EKF
+        
         kinematicModel function_handle
         
         imuReading (2, 1) double
@@ -23,8 +25,12 @@ classdef platform < handle
         
         localiseMatrix(3,:) double
         
+        OOI struct
         scannedOOIs (2,:) double
         expectedOOIs (2,:) double
+        visibleOOIs (2,:) double
+        
+        sonar(2,:) double
         
         currentPose (3,1) double
         localisedPose (3,1) double
@@ -69,9 +75,14 @@ classdef platform < handle
             obj.imuReading = [0;0];
             obj.readTime = [0;0];
             
+            obj.OOI = struct('expected', [0;0],...
+                'scanned', [0;0;0;0],...
+                'visible', [0;0;0;0])
+            
             % initialising remaining fields
             obj.positionRegister = zeros(4, 4096);
             obj.estimateRegister = zeros(4, 2048);
+            obj.sonar = zeros(2, 40);
             obj.estIndex = 1;
             obj.positionRegister(:,1) = [parameters.position; 0];
             obj.posIndex = 1;
@@ -81,6 +92,8 @@ classdef platform < handle
             obj.errIndex = 0;
             
             obj.expectedOOIs = double.empty(2, 0);
+            
+            obj.ekf = EKF();
         end
         
         % Configure parameters
@@ -142,13 +155,14 @@ classdef platform < handle
                         frame = 0;
                         obj.menu.control = 1;       %set to pause
                 end
-                if (frame == 4)         % do the data thing every 16 ticks
-                    frame = 0;
-                    [reference, measured, ~] = obj.associateScans();
-                    [pose, valid] = obj.EstimatePoseD(reference, measured);
-                    obj.localisedPose = pose;
-                    
-                end
+                % if (frame == 4)         % do the data thing every 16 ticks
+                %     frame = 0;
+                %
+                %     [reference, measured, ~] = obj.associateScans(obj.scannedOOIs, obj.expectedOOIs);
+                %     [pose, valid] = obj.EstimatePoseD(measured, reference);
+                %     obj.localisedPose = pose;
+                %
+                % end
             end
             
         end
@@ -180,6 +194,7 @@ classdef platform < handle
                 obj.params.lidarPose = params.lidarPos;
                 
             end
+            obj.ekf.configure("x0", obj.menu.params.initPos);
         end
         
         
@@ -208,19 +223,22 @@ classdef platform < handle
         end
         
         function updatePlot(obj, GCFvecs, Lvecs, ooi, landmarks, ooiCart)
-            obj.menu.updatePlotVectors(GCFvecs, Lvecs(1:4,:), Lvecs(5:8,:), obj.errRegister, obj.lidarIndex, obj.localisedPose);
+            obj.menu.updatePlotVectors(GCFvecs, Lvecs(1:4,:), Lvecs(5:8,:), obj.errRegister, obj.lidarIndex, obj.visibleOOIs, obj.localisedPose);
             obj.menu.updateLidarOOIs(ooi, landmarks, ooiCart);
         end
+        
         
         function processLidar(obj, eventData)
             %update current position
             obj.lidarIndex = obj.lidarIndex + 1;
-            computedVal = platform.predictPose([obj.readTime(2);eventData.t],...
-                obj.positionRegister(1:3, obj.posIndex), obj.imuReading, obj.kinematicModel);
-            obj.currentPose = computedVal(1:3);
+            computedPos = obj.ekf.estimate(obj.imuReading, [obj.readTime(2);eventData.t]);
+            
+            obj.currentPose = computedPos(1:3);
+            
+            
             
             %update errors
-            dPos = computedVal(1:3) - double(obj.api.gcgt());
+            dPos = computedPos(1:3) - double(obj.api.gcgt());
             obj.addToErrorBuffer([double(eventData.t);dPos]);
             
             % get range and intensities of both lidars
@@ -260,14 +278,19 @@ classdef platform < handle
             %transform lidar data to GCF
             scansCart = [x(1,:); y(1,:); x(2,:); y(2,:)];
             [L1G, L2G, O1G, O2G] = obj.lidarsToGCF(scansCart, ooi1C, ooi2C);
-            obj.addScannedOOI(cat(2,O1G, O2G));
+            
+            % Associate scans if new OOI found
+            if (obj.addScannedOOI(cat(2,O1G, O2G)))
+                [trueval, reference, diff] = obj.associateScans(obj.visibleOOIs, obj.expectedOOIs);
+                balls = 1
+            end
             
             %update plots (lidar, global and OOI)
             if (obj.menu.TabGroup.SelectedTab == obj.menu.StatusTab)
                 Lvecs = [x(obj.activeLidar,:);y(obj.activeLidar,:);theta;dist(obj.activeLidar,:);
                     L1G;L2G];
                 
-                obj.updatePlot(computedVal, Lvecs, ooi1P, ooi1C, obj.scannedOOIs);
+                obj.updatePlot([computedPos;obj.imuReading(1);obj.imuReading(2);0;0], Lvecs, ooi1P, ooi1C, obj.scannedOOIs);
             end
             % update lidar time
             obj.readTime(1) = eventData.t;
@@ -309,9 +332,9 @@ classdef platform < handle
             
             
             % generate pose estimate and store in position register
-            computedPos = platform.predictPose([obj.readTime(2);eventData.t],...
-                obj.positionRegister(1:3, obj.posIndex), obj.imuReading, obj.kinematicModel);
-            obj.addMeasurement(computedPos(1:4));
+            computedPos = obj.ekf.estimate(imu, [obj.readTime(2);eventData.t]);
+            
+            obj.addMeasurement(computedPos);
             
             
             % update imu read time
@@ -336,14 +359,23 @@ classdef platform < handle
             
             dist = pdist2(obj.scannedOOIs', scan', 'fasteuclidean');
             
-            tol = 0.1;
+            tol = 0.7;
             [regIndex, pointIndex] = find(dist<tol);
+            [ref, vis, ~] = obj.associateScans(scan, obj.expectedOOIs);
+            
+            % update EKF
+            if ~(isempty(ref))
+                obj.ekf.update(ref, vis);
+            end
+            
+            obj.menu.updateSonar(vis, obj.currentPose(1:2));
+            obj.visibleOOIs = vis;
             
             if ~(isempty(pointIndex)) %if corresponding index found
                 nonMatching = setdiff(1:size(scan, 2), pointIndex');
-                
+                visible = scan(:,pointIndex);
                 %overwrite existing
-                obj.scannedOOIs(:,regIndex) = scan(:,pointIndex);
+                obj.scannedOOIs(:,regIndex) = visible;
                 %append non-matching
                 obj.scannedOOIs = cat(2, obj.scannedOOIs, scan(:, nonMatching));
                 added = true;
@@ -351,21 +383,27 @@ classdef platform < handle
                 obj.scannedOOIs = cat(2, obj.scannedOOIs, scan);
                 added = false;
             end
+            
         end
         
         % get transformation matrix
-        function [reference, measured, delta] = associateScans(obj)
+        function [reference, measured, delta] = associateScans(obj, meas, ref)
             % - get list of landmarks from scanned OOIS
             
-            OOIs = obj.scannedOOIs;
-            dist = pdist2(obj.expectedOOIs', OOIs', 'fasteuclidean');
+            OOIs = meas;
+            eOOIs = ref;
+            dist = pdist2(eOOIs', OOIs', 'fasteuclidean');
             
             
             tol = 1.1;    %tolerance of euclidean distance
             [exIndex, scanIndex] = find(dist<tol);
-            reference = obj.expectedOOIs(:,exIndex);
+            reference = eOOIs(:,exIndex);
             measured = OOIs(:, scanIndex);
             delta = transpose(dist(sub2ind(size(dist),exIndex, scanIndex)));
+            if (size(measured,2)> 0)
+                [theta, rho] = cart2pol(measured(1,:)-obj.currentPose(1), measured(2,:)-obj.currentPose(2));
+                obj.sonar = [theta;rho];
+            end
             
         end
         
