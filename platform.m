@@ -21,16 +21,11 @@ classdef platform < handle
         % Registers
         positionRegister (4, :) double
         errRegister (4,:) double
-        estimateRegister (4,:) double
         
         localiseMatrix(3,:) double
         
         OOI struct
-        scannedOOIs (2,:) double
-        expectedOOIs (2,:) double
-        visibleOOIs (2,:) double
         
-        sonar(2,:) double
         
         currentPose (3,1) double
         localisedPose (3,1) double
@@ -75,14 +70,12 @@ classdef platform < handle
             obj.imuReading = [0;0];
             obj.readTime = [0;0];
             
-            obj.OOI = struct('expected', [0;0],...
-                'scanned', [0;0;0;0],...
-                'visible', [0;0;0;0])
+            obj.OOI = struct('expected', single.empty(2,0),...
+                'scanned', single.empty(2,0),...
+                'visible', single.empty(2,0));
             
             % initialising remaining fields
             obj.positionRegister = zeros(4, 4096);
-            obj.estimateRegister = zeros(4, 2048);
-            obj.sonar = zeros(2, 40);
             obj.estIndex = 1;
             obj.positionRegister(:,1) = [parameters.position; 0];
             obj.posIndex = 1;
@@ -91,7 +84,7 @@ classdef platform < handle
             obj.errRegister = zeros(4, 4096);
             obj.errIndex = 0;
             
-            obj.expectedOOIs = double.empty(2, 0);
+            obj.OOI.expected = double.empty(2, 0);
             
             obj.ekf = EKF();
         end
@@ -155,14 +148,6 @@ classdef platform < handle
                         frame = 0;
                         obj.menu.control = 1;       %set to pause
                 end
-                % if (frame == 4)         % do the data thing every 16 ticks
-                %     frame = 0;
-                %
-                %     [reference, measured, ~] = obj.associateScans(obj.scannedOOIs, obj.expectedOOIs);
-                %     [pose, valid] = obj.EstimatePoseD(measured, reference);
-                %     obj.localisedPose = pose;
-                %
-                % end
             end
             
         end
@@ -176,7 +161,7 @@ classdef platform < handle
             obj.localisedPose = obj.positionRegister(1:3,1);
             obj.posIndex = 1;
             
-            obj.scannedOOIs = double.empty(2,0);
+            obj.OOI.scanned = double.empty(2,0);
         end
         
         function applyParams(obj, params)
@@ -223,7 +208,7 @@ classdef platform < handle
         end
         
         function updatePlot(obj, GCFvecs, Lvecs, ooi, landmarks, ooiCart)
-            obj.menu.updatePlotVectors(GCFvecs, Lvecs(1:4,:), Lvecs(5:8,:), obj.errRegister, obj.lidarIndex, obj.visibleOOIs, obj.localisedPose);
+            obj.menu.updatePlotVectors(GCFvecs, Lvecs(1:4,:), Lvecs(5:8,:), obj.errRegister, obj.lidarIndex, obj.OOI.visible, obj.localisedPose);
             obj.menu.updateLidarOOIs(ooi, landmarks, ooiCart);
         end
         
@@ -280,17 +265,14 @@ classdef platform < handle
             [L1G, L2G, O1G, O2G] = obj.lidarsToGCF(scansCart, ooi1C, ooi2C);
             
             % Associate scans if new OOI found
-            if (obj.addScannedOOI(cat(2,O1G, O2G)))
-                [trueval, reference, diff] = obj.associateScans(obj.visibleOOIs, obj.expectedOOIs);
-                balls = 1
-            end
+            obj.findOOIs(cat(2,O1G, O2G));
             
             %update plots (lidar, global and OOI)
             if (obj.menu.TabGroup.SelectedTab == obj.menu.StatusTab)
                 Lvecs = [x(obj.activeLidar,:);y(obj.activeLidar,:);theta;dist(obj.activeLidar,:);
                     L1G;L2G];
                 
-                obj.updatePlot([computedPos;obj.imuReading(1);obj.imuReading(2);0;0], Lvecs, ooi1P, ooi1C, obj.scannedOOIs);
+                obj.updatePlot([computedPos;obj.imuReading(1);obj.imuReading(2);0;0], Lvecs, ooi1P, ooi1C, obj.OOI.scanned);
             end
             % update lidar time
             obj.readTime(1) = eventData.t;
@@ -333,54 +315,47 @@ classdef platform < handle
             
             % generate pose estimate and store in position register
             computedPos = obj.ekf.estimate(imu, [obj.readTime(2);eventData.t]);
-            
             obj.addMeasurement(computedPos);
             
             
             % update imu read time
             obj.readTime(2) = eventData.t;
             
-            % generate localised estimate and store
-            if ~(isempty(obj.localiseMatrix))
-                
-                obj.estimateRegister(:,obj.estIndex) = [
-                    platform.localToGlobalCF(obj.localiseMatrix(1:2), obj.localiseMatrix(3), obj.currentPose(1:2));
-                    obj.localiseMatrix(3); eventData.t];
-                obj.estIndex = obj.estIndex+1;
-            end
             
         end
         
-        function added = addScannedOOI(obj, scan)
+        function added = findOOIs(obj, scan)
             arguments
                 obj
-                scan (2,:) double
+                scan (2,:) single
             end
             
-            dist = pdist2(obj.scannedOOIs', scan', 'fasteuclidean');
-            
-            tol = 0.7;
-            [regIndex, pointIndex] = find(dist<tol);
-            [ref, vis, ~] = obj.associateScans(scan, obj.expectedOOIs);
-            
+            % associate currently visible points with oois
+            [ref, vis, ~] = obj.associateScans(scan, obj.OOI.expected);
             % update EKF
             if ~(isempty(ref))
                 obj.ekf.update(ref, vis);
             end
             
+            % update sonar plot
             obj.menu.updateSonar(vis, obj.currentPose(1:2));
-            obj.visibleOOIs = vis;
+            obj.OOI.visible = vis;
+            
+            % update existing OOI position register
+            dist = pdist2(obj.OOI.scanned', vis', 'fasteuclidean');
+            tol = 0.7;
+            [regIndex, pointIndex] = find(dist<tol);
             
             if ~(isempty(pointIndex)) %if corresponding index found
-                nonMatching = setdiff(1:size(scan, 2), pointIndex');
-                visible = scan(:,pointIndex);
+                nonMatching = setdiff(1:size(vis, 2), pointIndex');
+                visible = vis(:,pointIndex);
                 %overwrite existing
-                obj.scannedOOIs(:,regIndex) = visible;
+                obj.OOI.scanned(:,regIndex) = visible;
                 %append non-matching
-                obj.scannedOOIs = cat(2, obj.scannedOOIs, scan(:, nonMatching));
+                obj.OOI.scanned = cat(2, obj.OOI.scanned, vis(:, nonMatching));
                 added = true;
             else
-                obj.scannedOOIs = cat(2, obj.scannedOOIs, scan);
+                obj.OOI.scanned = cat(2, obj.OOI.scanned, vis);
                 added = false;
             end
             
@@ -395,15 +370,11 @@ classdef platform < handle
             dist = pdist2(eOOIs', OOIs', 'fasteuclidean');
             
             
-            tol = 1.1;    %tolerance of euclidean distance
+            tol = 0.75;    %tolerance of euclidean distance
             [exIndex, scanIndex] = find(dist<tol);
             reference = eOOIs(:,exIndex);
             measured = OOIs(:, scanIndex);
             delta = transpose(dist(sub2ind(size(dist),exIndex, scanIndex)));
-            if (size(measured,2)> 0)
-                [theta, rho] = cart2pol(measured(1,:)-obj.currentPose(1), measured(2,:)-obj.currentPose(2));
-                obj.sonar = [theta;rho];
-            end
             
         end
         
@@ -444,7 +415,7 @@ classdef platform < handle
             %set initial position - mmove?
             obj.positionRegister(:, 1) = [env.pose0;0];
             obj.params.lidarPose = lidarPose;
-            obj.expectedOOIs = env.Context.Landmarks;
+            obj.OOI.expected = env.Context.Landmarks;
             
             % set initial lidars
             

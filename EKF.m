@@ -10,6 +10,7 @@ classdef EKF < handle
         cov_v double % Relative uncertainty in speed measurements
         cov_l double % Relative uncertainty in lidar ranges
         x_init (3,1) double % Beginning pos
+        P_init (3,3) double % Beginning Covariance Matrix
     end
     properties (Access = public)
         P (3,3) double
@@ -26,9 +27,9 @@ classdef EKF < handle
                 sigma_omega double = deg2rad(3)
                 sigma_v double = 0.05
                 sigma_d double = 0.15
-                cov_w double = 0.05
-                cov_v double = 0.1
-                cov_l double = deg2rad(5)
+                cov_w double = 0
+                cov_v double = 0
+                cov_l double = 0
                 
             end
             obj.sigma_omega = sigma_omega;
@@ -38,6 +39,7 @@ classdef EKF < handle
             obj.cov_v = cov_v;
             obj.cov_l = cov_l;
             
+            obj.P_init = diag([cov_v, cov_l, cov_w]);
             obj.P = zeros(3,3); % <- initial known exactly
             obj.initialised = false;
             
@@ -81,7 +83,9 @@ classdef EKF < handle
             
         end
         
-        function reset()
+        function reset(obj)
+            obj.xpos = obj.x_init;
+            obj.P = obj.P_init;
         end
         
         function est = estimate(obj, imu, t)
@@ -126,7 +130,7 @@ classdef EKF < handle
             
             for j = 1:5
                 
-                R = obj.sigma_d^2*4;
+                R = obj.sigma_d^2*4; % artificially increase std.dev
                 
                 % SONAR distance to OOIs (measured)
                 z_meas = sqrt((ooi_meas(1,:) - obj.xpos(1)).^2 + (ooi_meas(2,:) - obj.xpos(2)).^2);
