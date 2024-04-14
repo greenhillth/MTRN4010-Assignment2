@@ -34,7 +34,7 @@ classdef platform < handle
         % indexes
         posIndex uint16
         lidarIndex uint16
-        errIndex uint8
+        errIndex uint16
         estIndex uint16
         
         
@@ -75,13 +75,13 @@ classdef platform < handle
                 'visible', single.empty(2,0));
             
             % initialising remaining fields
-            obj.positionRegister = zeros(4, 4096);
+            obj.positionRegister = zeros(4, 512);
             obj.estIndex = 1;
             obj.positionRegister(:,1) = [parameters.position; 0];
             obj.posIndex = 1;
             obj.lidarIndex = 0;
             obj.activeLidar = 1;
-            obj.errRegister = zeros(4, 4096);
+            obj.errRegister = zeros(4, 512);
             obj.errIndex = 0;
             
             obj.OOI.expected = double.empty(2, 0);
@@ -130,6 +130,7 @@ classdef platform < handle
             control = 1;
             frame = 0;
             tic;
+            obj.api.b.MkSeparateMenuControl();
             % event cycle
             while (control ~= 0)
                 frame = frame+1;
@@ -137,6 +138,7 @@ classdef platform < handle
                 obj.menu.ProcessStep.Value = toc*1e3;
                 tic;
                 control = obj.menu.control;
+                finished = false;
                 switch (control)
                     case 1      % pause
                         pause(0.05);
@@ -148,8 +150,16 @@ classdef platform < handle
                         frame = 0;
                         obj.menu.control = 1;       %set to pause
                 end
+                if finished
+                    times = obj.errRegister(1, 1:obj.errIndex);
+                    err = obj.errRegister(2:4, 1:obj.errIndex);
+                    std = obj.ekf.StdRegister(2:4, 1:obj.errIndex);
+                    {times; err; std};
+                    platform.produceErrorPlots(times*1e-3, err, std);
+                    finished = false;
+                    obj.menu.control = 1;
+                end
             end
-            
         end
         
         function reset(obj)
@@ -159,7 +169,7 @@ classdef platform < handle
             obj.readTime = [0;0];
             obj.lidarIndex = 0;
             obj.localisedPose = obj.positionRegister(1:3,1);
-            obj.posIndex = 1;
+            obj.posIndex = 0;
             
             obj.OOI.scanned = double.empty(2,0);
         end
@@ -179,32 +189,32 @@ classdef platform < handle
                 obj.params.lidarPose = params.lidarPos;
                 
             end
-            obj.ekf.configure("x0", obj.menu.params.initPos);
+            obj.ekf.configure("x0", obj.menu.params.initPos, "bias", 0);
         end
         
         
         
-        function inProgress = processEvent(obj)
+        function finished = processEvent(obj)
             
             nextEvent = obj.api.RdE;
             event = nextEvent();
             switch (event.ty)
                 case 0  % end case
                     disp('End of event');
-                    inProgress = false;
+                    finished = true;
                     return;
                 case 1  % lidar case
                     obj.updateStatus("Processing Lidar");
                     obj.t = event.t;
                     obj.processLidar(event);
                 case 2
-                    obj.t = event.t;
                     obj.updateStatus("Processing IMU");
+                    obj.t = event.t;
                     obj.processIMU(event);
                 otherwise
                     
             end
-            inProgress = true;
+            finished = false;
         end
         
         function updatePlot(obj, GCFvecs, Lvecs, ooi, landmarks, ooiCart)
@@ -216,8 +226,8 @@ classdef platform < handle
         function processLidar(obj, eventData)
             %update current position
             obj.lidarIndex = obj.lidarIndex + 1;
-            computedPos = obj.ekf.estimate(obj.imuReading, [obj.readTime(2);eventData.t]);
-            
+            computedPos = obj.ekf.estimate(obj.imuReading, [obj.readTime(1);eventData.t]);
+            obj.addMeasurement(computedPos);
             obj.currentPose = computedPos(1:3);
             
             
@@ -314,8 +324,8 @@ classdef platform < handle
             
             
             % generate pose estimate and store in position register
-            computedPos = obj.ekf.estimate(imu, [obj.readTime(2);eventData.t]);
-            obj.addMeasurement(computedPos);
+            % computedPos = obj.ekf.estimate(imu, [obj.readTime(2);eventData.t]);
+            % obj.addMeasurement(computedPos);
             
             
             % update imu read time
@@ -432,8 +442,13 @@ classdef platform < handle
                 obj platform
                 measurement (4, 1) double
             end
-            obj.posIndex = obj.posIndex + 1;
-            obj.positionRegister(:, obj.posIndex) = measurement;
+            idx = obj.posIndex + 1;
+            
+            if(idx > size(obj.positionRegister,2))
+                obj.positionRegister = cat(2, obj.positionRegister, zeros(4,512));
+            end
+            obj.positionRegister(:, idx) = measurement;
+            obj.posIndex = idx;
         end
         
         function path = getPathVectors(obj)
@@ -450,12 +465,13 @@ classdef platform < handle
                 obj
                 error (4,1) double
             end
-            obj.errIndex = obj.errIndex + 1;
-            if(obj.errIndex >= size(obj.errRegister, 2))
-                obj.errRegister = cat(2, obj.errRegister, zeros(4, 2048));
+            idx = obj.errIndex + 1;
+            if(idx > size(obj.errRegister, 2))
+                obj.errRegister = cat(2, obj.errRegister, zeros(4, 512));
             end
             
-            obj.errRegister(:,obj.errIndex) = error;
+            obj.errRegister(:,idx) = error;
+            obj.errIndex = idx;
         end
     end
     methods (Static)
@@ -474,6 +490,34 @@ classdef platform < handle
             m = model(imu(1), x0(3), imu(2));
             computedVal = [x0(1:3)+dt*m;t0+dt*imu(1);dt*imu(2);m];
             
+        end
+        function [pVec, maxE, avgE] = getSTDinfo(eVec, stdVec)
+            arguments
+                eVec (1,:) double
+                stdVec (1,:) double
+            end
+            out1d = 0;
+            out2d = 0;
+            out3d = 0;
+            numVals = length(eVec);
+            for i = 1:length(eVec)
+                val = abs(eVec(i));
+                std = stdVec(i);
+                if (val > std)
+                    out1d = out1d+1;
+                    if (val > 2*std)
+                        out2d = out2d+1;
+                        if (val > 3*std)
+                            out3d = out3d+1;
+                        end
+                    end
+                end
+            end
+            pVec = [(numVals-out1d)/numVals;
+                (numVals-out2d)/numVals;
+                (numVals-out3d)/numVals];
+            maxE = max(eVec);
+            avgE = mean(eVec);
         end
         
         function globalC = localToGlobalCF(localC, rotation, translation)
@@ -506,6 +550,108 @@ classdef platform < handle
             range = range.*1e-2;      % convert to m
             intensity = uint8(bitshift(scan, -14));
             
+        end
+        
+        function produceErrorPlots(t, e, std_devs)
+            arguments
+                t (1,:) double
+                e (3,:) double % Error matrix with row 1 as xerr, row 2 as yerr and row 3 as herr
+                std_devs (3,:) double % std_dev matrix with row 1 as x_std, row 2 as y_std and row 3 as h_std
+            end
+            
+            finalIdx = length(t);
+            x = t(1,1:finalIdx);
+            y1 = e(1,1:finalIdx);
+            std1 = std_devs(1,1:finalIdx);
+            
+            y2 = e(2,1:finalIdx);
+            std2 = std_devs(2,1:finalIdx);
+            
+            y3 = rad2deg(e(3,1:finalIdx));
+            std3 = rad2deg(std_devs(3,1:finalIdx));
+            
+            colours = ["#3154b5","#0aeff7","#2fe053", "#000000"];
+            
+            % Create a new figure
+            fig = figure(2);
+            title('Error Plots');
+            screenSize = get(groot, 'ScreenSize');
+            figWidth = 600; % Adjust the width of the figure as needed
+            figHeight = 500; % Adjust the height of the figure as needed
+            figPosX = (screenSize(3) - figWidth) / 2;
+            figPosY = (screenSize(4) - figHeight) / 2;
+            set(fig, 'Position', [figPosX, figPosY, figWidth, figHeight]);
+            ybounds1 = [-1, 1];
+            ybounds2 = [-10, 10];
+            xbounds = [0, t(end)];
+            
+            
+            % Create the first subplot
+            ax1 = subplot(3,1,1);
+            tline1 = "Error and Standard Deviation in X";
+            [probs, max, avg] = platform.getSTDinfo(y1, std1); p = probs*100; p = round(p);
+            tline2 = sprintf('Within: 1\\sigma - %i%%, 2\\sigma - %i%%, 3\\sigma - %i%%',p(1), p(2), p(3));
+            tline3 = sprintf('Max: %.2f, Average: %.2f', max, avg);
+            hold(ax1, "on");
+            plot(ax1, x, y1, "Color", colours(1), "LineWidth", 3);
+            plot(ax1, x, std1, "Color", colours(2));
+            plot(ax1, x, -std1, "Color", colours(2));
+            plot(ax1, x, 2*std1, "Color", colours(3));
+            plot(ax1, x, -2*std1, "Color", colours(3));
+            plot(ax1, x, 3*std1, "Color", colours(4));
+            plot(ax1, x, -3*std1, "Color", colours(4));
+            hold(ax1, "off");
+            
+            xlim(ax1, xbounds);
+            ylim(ax1, ybounds1);
+            
+            title([tline1, append(tline2, ', ', tline3)]);
+            xlabel('t, seconds');
+            ylabel('Err(X), meters');
+            
+            % Create the second subplot
+            ax2 = subplot(3,1,2);
+            tline1 = "Error and Standard Deviation in Y";
+            [probs, max, avg] = platform.getSTDinfo(y2, std2); p = probs*100; p = round(p);
+            tline2 = sprintf('Within: 1\\sigma - %i%%, 2\\sigma - %i%%, 3\\sigma - %i%%',p(1), p(2), p(3));
+            tline3 = sprintf('Max: %.2f, Average: %.2f', max, avg);
+            hold(ax2, "on");
+            plot(ax2, x, y2, "Color", colours(1), "LineWidth", 3);
+            plot(ax2, x, std2, "Color", colours(2));
+            plot(ax2, x, -std2, "Color", colours(2));
+            plot(ax2, x, 2*std2, "Color", colours(3));
+            plot(ax2, x, -2*std2, "Color", colours(3));
+            plot(ax2, x, 3*std2, "Color", colours(4));
+            plot(ax2, x, -3*std2, "Color", colours(4));
+            hold(ax2, "off");
+            
+            xlim(ax2, xbounds);
+            ylim(ax2, ybounds1);
+            title([tline1, append(tline2, ', ', tline3)]);
+            xlabel('t, seconds');
+            ylabel('Err(Y), meters');
+            
+            % Create the third subplot
+            ax3 = subplot(3,1,3);
+            tline1 = "Error and Standard Deviation in Heading";
+            [probs, max, avg] = platform.getSTDinfo(y3, std3); p = round(probs*100);
+            tline2 = sprintf('Within: 1\\sigma - %i%%, 2\\sigma - %i%%, 3\\sigma - %i%%',p(1), p(2), p(3));
+            tline3 = sprintf('Max: %.2f, Average: %.2f', max, avg);
+            hold(ax3, "on");
+            plot(ax3, x, y3, "Color", colours(1), "LineWidth", 3);
+            plot(ax3, x, std3, "Color", colours(2));
+            plot(ax3, x, -std3, "Color", colours(2));
+            plot(ax3, x, 2*std3, "Color", colours(3));
+            plot(ax3, x, -2*std3, "Color", colours(3));
+            plot(ax3, x, 3*std3, "Color", colours(4));
+            plot(ax3, x, -3*std3, "Color", colours(4));
+            hold(ax3, "off");
+            
+            xlim(ax3, xbounds);
+            ylim(ax3, ybounds2);
+            title([tline1, append(tline2, ', ', tline3)]);
+            xlabel('t, seconds');
+            ylabel('Err(\phi), degrees');
         end
     end
 end

@@ -9,13 +9,15 @@ classdef EKF < handle
         cov_w double % Relative uncertainty in angular velocity measurements
         cov_v double % Relative uncertainty in speed measurements
         cov_l double % Relative uncertainty in lidar ranges
-        x_init (3,1) double % Beginning pos
-        P_init (3,3) double % Beginning Covariance Matrix
+        x_init (4,1) double % Beginning pos
+        P_init (4,4) double % Beginning Covariance Matrix
     end
     properties (Access = public)
-        P (3,3) double
-        xpos (3, 1) double
+        P (4,4) double
+        xpos (4, 1) double
         initialised single
+        StdRegister (4,:) double
+        varIndex uint16
         
         
     end
@@ -39,9 +41,11 @@ classdef EKF < handle
             obj.cov_v = cov_v;
             obj.cov_l = cov_l;
             
-            obj.P_init = diag([cov_v, cov_l, cov_w]);
-            obj.P = zeros(3,3); % <- initial known exactly
+            obj.P_init = diag([cov_v, cov_l, cov_w, 0]);
+            obj.P = zeros(4,4); % <- initial known exactly
             obj.initialised = false;
+            obj.StdRegister = zeros(4, 512);
+            obj.varIndex = 0;
             
         end
         
@@ -49,6 +53,7 @@ classdef EKF < handle
             arguments
                 obj
                 params.x0 (3,:) double = double.empty(3,0)
+                params.bias double = double.empty
                 params.sigma_omega double = -1
                 params.sigma_v double = -1
                 params.sigma_d double = -1
@@ -58,8 +63,12 @@ classdef EKF < handle
             end
             
             if ~isempty(params.x0)
-                obj.x_init = params.x0;
-                obj.xpos = params.x0;
+                obj.x_init(1:3) = params.x0;
+                obj.xpos(1:3) = params.x0;
+            end
+            if ~isempty(params.bias)
+                obj.x_init(4) = params.bias;
+                obj.xpos(4) = params.bias;
             end
             if (params.sigma_omega >= 0)
                 obj.sigma_omega = params.sigma_omega;
@@ -100,23 +109,27 @@ classdef EKF < handle
             
             v = imu(1);
             omega = imu(2);
-            curr = obj.xpos(1:3);
+            curr = obj.xpos(1:4);
             
             % Prediction step
             obj.xpos = curr + [v * cos(curr(3)) * delta_t;
                 v * sin(curr(3)) * delta_t;
-                omega * delta_t];
+                omega * delta_t;
+                0];
             
-            Q = diag([(obj.sigma_omega * 2 * delta_t)^2, ...
-                (obj.sigma_omega * 2 *delta_t)^2, (obj.sigma_v * delta_t)^2]);
+            Q = diag([(obj.sigma_omega * delta_t)^2, ...
+                (obj.sigma_omega * delta_t)^2, (obj.sigma_v * delta_t)^2, 0]);
             
-            F = [1, 0, -v * sin(curr(3)) * delta_t;
-                0, 1,  v * cos(curr(3)) * delta_t;
-                0, 0,  1];
+            F = [1, 0, -v * sin(curr(3)) * delta_t, 0;
+                0, 1, v * cos(curr(3)) * delta_t, 0;
+                0, 0, 1, 0;
+                0, 0, 0, 1];
             
             obj.P = F * obj.P * F' + Q;
             
-            est = [obj.xpos; t(2)*1e-4];
+            est = [obj.xpos(1:3); t(2)*1e-4];
+            
+            obj.addToStdRegister(obj.P(1:3, 1:3), t(2));
             
         end
         
@@ -128,9 +141,9 @@ classdef EKF < handle
                 ooi_meas (2, :) double
             end
             
-            for j = 1:5
+            for j = 1:4
                 
-                R = obj.sigma_d^2*4; % artificially increase std.dev
+                R = obj.sigma_d^2; % artificially increase std.dev
                 
                 % SONAR distance to OOIs (measured)
                 z_meas = sqrt((ooi_meas(1,:) - obj.xpos(1)).^2 + (ooi_meas(2,:) - obj.xpos(2)).^2);
@@ -140,16 +153,34 @@ classdef EKF < handle
                     d_exp = sqrt((ooi_ref(1,i) - obj.xpos(1))^2 + (ooi_ref(2,i) - obj.xpos(2))^2);
                     
                     % Update step
-                    H = [(obj.xpos(1) - ooi_ref(1,i))/d_exp, (obj.xpos(2) - ooi_ref(2,i))/d_exp, 0];
+                    H = [(obj.xpos(1) - ooi_ref(1,i))/d_exp, (obj.xpos(2) - ooi_ref(2,i))/d_exp, 0, 0];
                     
                     K = obj.P * H' * inv(H * obj.P * H' + R); % Kalman gain
                     obj.xpos = obj.xpos + K * (z_meas(i)-d_exp); % Update state estimate
-                    obj.P = (eye(3) - K * H) * obj.P; % Update covariance matrix
+                    obj.P = (eye(4) - K * H) * obj.P; % Update covariance matrix
+                    obj.xpos(4) = clip(obj.xpos(4), -1, 1); % Clamp bias to values between -1 and 1
                 end
             end
             
             x = obj.xpos;
             P = obj.P;
+            
+        end
+    end
+    methods (Access = private)
+        function addToStdRegister(obj, P, t)
+            arguments
+                obj
+                P (3,3) double
+                t double
+            end
+            stds = [sqrt(P(1,1));sqrt(P(2,2));sqrt(P(3,3))];
+            idx = obj.varIndex + 1;
+            if (idx > size(obj.StdRegister,2))
+                cat(2, obj.StdRegister, zeros(4, 512));
+            end
+            obj.StdRegister(:, idx) = [t; stds];
+            obj.varIndex = idx;
         end
     end
     methods (Static)
