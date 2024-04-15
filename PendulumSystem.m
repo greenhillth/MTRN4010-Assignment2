@@ -12,12 +12,15 @@ classdef PendulumSystem < handle
     end
     properties (Access = private)
         sensor struct
+        amp double
         step uint32
         u function_handle
         x_est (2,1) double
         P_diag (2,:) double
         P (2,2) double
         R double
+        
+        anim struct
         
         trueRegister(3,:) double
         estimateRegister(3,:) double
@@ -56,12 +59,14 @@ classdef PendulumSystem < handle
             obj.step = 0;
             
             amp = params.signal.amplitude;
+            obj.amp = amp;
             freq = params.signal.frequency;
             obj.u = @(t) amp * square(2*pi*freq*t);
             
             n = (params.T/obj.dt)+1;
             obj.t = obj.tspan(1):obj.dt:obj.tspan(2);
             
+            %init registers
             obj.trueRegister = zeros(3, n);
             obj.estimateRegister = zeros(3, n);
             obj.varRegister = zeros(3, n);
@@ -80,7 +85,12 @@ classdef PendulumSystem < handle
             obj.P = eye(2) * 0.1^2;
             obj.R = deg2rad(5)^2;
             
+            obj.initAnimation();
+            uint32 frame;
+            frame = 0;
+            
             for t = 0:obj.dt:obj.tspan(2)
+                frame = frame+1;
                 
                 % add calculated state to state register
                 obj.addCalculation(t, state);
@@ -89,19 +99,24 @@ classdef PendulumSystem < handle
                 [time, state] = PendulumSystem.RK4(pendODE, t, state, obj.dt);
                 
                 % estimate step
-                obj.estimate();
+                [p_est, x_est] = obj.estimate();
                 % measure
                 meas = readSensor(obj, t, state(2));
                 if ~isempty(meas)
-                    obj.update(meas);
+                    obj.update(meas, p_est, x_est);
+                else
+                    obj.x_est = x_est;
+                    obj.P = p_est;
                 end
+                
                 
                 % compute error
                 obj.addError(t,state-obj.x_est);
                 
+                if (mod(frame,4) == 0)
+                    obj.animate(state(1), obj.x_est(1), t, frame);
+                end
             end
-            balls = obj.trueRegister(:, 1:obj.trueIndex);
-            tits = obj.estimateRegister(:, 1:end);
             fprintf('balls');
         end
         
@@ -120,12 +135,12 @@ classdef PendulumSystem < handle
             dydt(2) = -obj.a*sin(y(1)) - obj.b*y(2) + obj.c*obj.u(t); % acceleration
         end
         
-        function estimate(obj)
-            F = [1, -obj.b*obj.dt; -obj.a*cos(obj.x_est(1) - obj.b*obj.x_est(2))*obj.dt, 1];
+        function [p, x] = estimate(obj)
+            F = [1, -obj.b*obj.dt*10; -obj.a*cos(obj.x_est(1) - obj.b*obj.x_est(2))*obj.dt*10, 1];
             G = [0;obj.c*obj.dt];
             
             % Compute the partial derivatives of the state transition function
-            F = [1, -obj.b*obj.dt; -obj.a*cos(obj.x_est(1) - obj.b*obj.x_est(2))*obj.dt, 1];
+            F = [1, -obj.b*obj.dt*10; -obj.a*cos(obj.x_est(1) - obj.b*obj.x_est(2))*obj.dt*10, 1];
             
             % Compute G matrix
             G = [0; obj.c*obj.dt];
@@ -138,7 +153,7 @@ classdef PendulumSystem < handle
             
             % Compute G matrix
             G1 = 0;
-            G2 = obj.c*obj.dt;
+            G2 = obj.c*1.5;
             
             % Assemble F matrix
             F = [F11, F12; F21, F22];
@@ -146,49 +161,34 @@ classdef PendulumSystem < handle
             % Assemble G matrix
             G = [G1; G2];
             
-            obj.x_est = F * obj.x_est;
-            obj.P = F * obj.P * F' + G * obj.R * G';
+            x = F * obj.x_est;
+            p = F * obj.P * F' + G * obj.R * G';
         end
         
-        function update(obj, meas)
-            
-            H = [0, 1]; % Measurement matrix (only measure angle)
-            % S = H * obj.P * H' + obj.R;
-            % K = obj.P * H' / S;
-            % obj.x_est = obj.x_est + K * (meas - H * obj.x_est);
-            % obj.P = (eye(2) - K * H) * obj.P;
-            
-            H = [0, 1];
-            
-            
-            % Compute innovation (measurement residual)
-            delta_meas = meas - obj.x_est(2);
-            
-            % Compute innovation covariance
-            S = H * obj.P* H' + obj.R;
-            
-            % Compute Kalman gain
-            K = obj.P * H' / S;
-            
-            % Update state estimate
-            obj.x_est = obj.x_est + K * delta_meas;
-            
-            % Update covariance estimate
-            obj.P = (eye(2) - K * H) * obj.P;
-            
+        function update(obj, meas, p_est, x_est)
+            arguments
+                obj
+                meas (1,1) double
+                p_est (2,2) double
+                x_est (2,1) double
+            end
+            H = [0,1]; % Jacobian of measurement function
+            K = p_est * H' * inv(H * p_est * H' + obj.R);
+            obj.x_est = x_est + K * (meas - x_est(2));
+            obj.P = (eye(2) - K * H) * p_est;
         end
         
         function plot(obj)
-            figure;
+            figure(2);
             subplot(2, 1, 1);
             idx = obj.sensor.numMeasurements;
-            plot(obj.t, obj.estimateRegister(2, :));
-            hold on;
             plot(obj.t, obj.trueRegister(2, :));
+            hold on;
+            plot(obj.t, obj.estimateRegister(2, :));
             title('Estimated and Actual Pendulum Angle vs. Time');
             xlabel('Time (s)');
             ylabel('Angle (\phi)');
-            legend('Estimated Angle', 'Actual Angle');
+            legend('Actual Angle', 'Estimated Angle');
             
             subplot(2, 1, 2);
             plot(obj.sensor.measurements(1,1:idx), obj.sensor.measurements(2, 1:idx), "LineStyle", "none","Marker","o");
@@ -198,6 +198,145 @@ classdef PendulumSystem < handle
             title('Estimated and Actual Pendulum Angular Velocity vs. Time');
             xlabel('Time (s)');
             legend('Measured Velocity', 'Estimated Velocity', 'Actual Velocity');
+        end
+        
+        function initAnimation(obj)
+            %init animation objects
+            fig = figure(1);
+            
+            screenSize = groot().ScreenSize;
+            width = 800;
+            height = 900;
+            x = (screenSize(3) - width) / 2;
+            y = (screenSize(4) - height) / 2;
+            set(fig, 'Position', [x, y, width, height], 'Name', 'Pendulum Animation');
+            
+            % animation axis
+            ax1 = subplot(2,1,1);
+            ax2 = subplot(2,1,2);
+            axis(ax1, "equal");
+            
+            ax1.Title.String = "Pendulum Animation";
+            ax1.FontSize = 14;
+            ax1.FontWeight = 'bold';
+            ax1.XAxis.Visible = 'off';
+            ax1.YAxis.Visible = 'off';
+            
+            %input axis
+            
+            ax2.Title.String = "Input u(t)";
+            xlim(ax2, [0, obj.tspan(2)]);
+            ylim(ax2, [-1.5*obj.amp, 1.5*obj.amp]);
+            
+            ax1.Position = [0.13 0.28 0.77 0.6];
+            ax1.PositionConstraint = "outerposition";
+            ax2.Position = [0.13 0.11 0.77 0.11];
+            ax2.PositionConstraint = "innerposition";
+            
+            
+            
+            iCons = obj.initcons;
+            
+            
+            % black, grey, blue
+            colour = ["#000000", "#5e636b", "#4287f5", "#eb4034", "#f27e18"];
+            
+            %arm params
+            
+            length = 30;
+            
+            xlim(ax1, [-1.5*length, 1.5*length]);
+            ylim(ax1, [-1.5*length, 1.5*length]);
+            
+            initPos = [length*sin(iCons(1)); -length*cos(iCons(1))];
+            
+            arm = line(ax1,...
+                [0, initPos(1)], [0, initPos(2)],...
+                'Color', colour(2),...
+                'LineWidth', 1,...
+                'Marker', '+',...
+                'MarkerSize', 5);
+            
+            e_arm = line(ax1,...
+                [0, initPos(1)], [0, initPos(2)],...
+                'Color', colour(2),...
+                'LineWidth', 1,...
+                'LineStyle', "--",...
+                'Marker', '+',...
+                'MarkerSize', 5);
+            
+            
+            radius = 4;
+            bob = rectangle(ax1,...
+                'Position', [initPos(1)-radius, initPos(2)-radius, radius*2, radius*2],...
+                'Curvature', [1, 1], ...
+                'EdgeColor', colour(3),...
+                'LineWidth', 2);
+            
+            e_bob = rectangle(ax1,...
+                'Position', [initPos(1)-radius, initPos(2)-radius, radius*2, radius*2],...
+                'Curvature', [1, 1], ...
+                'EdgeColor', colour(4),...
+                'LineWidth', 1.5);
+            
+            sig = line(ax2,...
+                zeros(1,obj.tspan(2)/obj.dt+1), zeros(1,obj.tspan(2)/obj.dt+1),...
+                'Color', colour(4),...
+                'LineStyle', "none", ...
+                'Marker', ".",...
+                'MarkerSize', 10 ...
+                );
+            
+            
+            obj.anim = struct (...
+                'pAx', ax1,...
+                'inAx', ax2,...
+                'length', length,...
+                'radius', radius,...
+                'pos', initPos,...
+                'arm', arm,...
+                'bob', bob,...
+                'e_arm', e_arm,...
+                'e_bob', e_bob,...
+                'signal', sig...
+                );
+            
+            
+        end
+        
+        function animate(obj, act_theta, est_theta, t, frame)
+            arguments
+                obj
+                act_theta (1,1) double
+                est_theta (1,1) double
+                t (1,1) double
+                frame uint16
+            end
+            rad = obj.anim.radius;
+            % get actual pos
+            act_x = obj.anim.length * sin(act_theta);
+            act_y = -obj.anim.length * cos(act_theta);
+            act_vec = [act_x-rad, act_y-rad, rad*2, rad*2];
+            
+            % get estimator pos
+            est_x = obj.anim.length * sin(est_theta);
+            est_y = -obj.anim.length * cos(est_theta);
+            est_vec = [est_x-rad, est_y-rad, rad*2, rad*2];
+            
+            obj.anim.arm.XData = [0,act_x];
+            obj.anim.arm.YData = [0,act_y];
+            obj.anim.bob.Position = act_vec;
+            
+            obj.anim.e_arm.XData = [0,est_x];
+            obj.anim.e_arm.YData = [0,est_y];
+            obj.anim.e_bob.Position = est_vec;
+            
+            
+            obj.anim.signal.XData(frame) = t;
+            obj.anim.signal.YData(frame) = obj.u(t);
+            pause(obj.dt);
+            
+            
         end
         
         function y = readSensor(obj, t, reading)

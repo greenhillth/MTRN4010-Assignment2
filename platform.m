@@ -155,7 +155,7 @@ classdef platform < handle
                     err = obj.errRegister(2:4, 1:obj.errIndex);
                     std = obj.ekf.StdRegister(2:4, 1:obj.errIndex);
                     {times; err; std};
-                    platform.produceErrorPlots(times*1e-3, err, std);
+                    platform.produceErrorPlots(times*1e-4, err, std);
                     finished = false;
                     obj.menu.control = 1;
                 end
@@ -165,11 +165,14 @@ classdef platform < handle
         function reset(obj)
             obj.menu.flags.reset = false;
             obj.api.b.Rst();
+            obj.ekf.reset();
             obj.imuReading = [0;0];
             obj.readTime = [0;0];
             obj.lidarIndex = 0;
+            obj.errIndex = 0;
             obj.localisedPose = obj.positionRegister(1:3,1);
-            obj.posIndex = 0;
+            
+            obj.posIndex = 1;
             
             obj.OOI.scanned = double.empty(2,0);
         end
@@ -592,8 +595,8 @@ classdef platform < handle
             [probs, max, avg] = platform.getSTDinfo(y1, std1); p = probs*100; p = round(p);
             tline2 = sprintf('Within: 1\\sigma - %i%%, 2\\sigma - %i%%, 3\\sigma - %i%%',p(1), p(2), p(3));
             tline3 = sprintf('Max: %.2f, Average: %.2f', max, avg);
-            hold(ax1, "on");
             plot(ax1, x, y1, "Color", colours(1), "LineWidth", 3);
+            hold(ax1, "on");
             plot(ax1, x, std1, "Color", colours(2));
             plot(ax1, x, -std1, "Color", colours(2));
             plot(ax1, x, 2*std1, "Color", colours(3));
@@ -615,8 +618,8 @@ classdef platform < handle
             [probs, max, avg] = platform.getSTDinfo(y2, std2); p = probs*100; p = round(p);
             tline2 = sprintf('Within: 1\\sigma - %i%%, 2\\sigma - %i%%, 3\\sigma - %i%%',p(1), p(2), p(3));
             tline3 = sprintf('Max: %.2f, Average: %.2f', max, avg);
-            hold(ax2, "on");
             plot(ax2, x, y2, "Color", colours(1), "LineWidth", 3);
+            hold(ax2, "on");
             plot(ax2, x, std2, "Color", colours(2));
             plot(ax2, x, -std2, "Color", colours(2));
             plot(ax2, x, 2*std2, "Color", colours(3));
@@ -637,8 +640,8 @@ classdef platform < handle
             [probs, max, avg] = platform.getSTDinfo(y3, std3); p = round(probs*100);
             tline2 = sprintf('Within: 1\\sigma - %i%%, 2\\sigma - %i%%, 3\\sigma - %i%%',p(1), p(2), p(3));
             tline3 = sprintf('Max: %.2f, Average: %.2f', max, avg);
-            hold(ax3, "on");
             plot(ax3, x, y3, "Color", colours(1), "LineWidth", 3);
+            hold(ax3, "on");
             plot(ax3, x, std3, "Color", colours(2));
             plot(ax3, x, -std3, "Color", colours(2));
             plot(ax3, x, 2*std3, "Color", colours(3));

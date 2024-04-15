@@ -95,6 +95,8 @@ classdef EKF < handle
         function reset(obj)
             obj.xpos = obj.x_init;
             obj.P = obj.P_init;
+            obj.StdRegister = zeros(4, 512);
+            obj.varIndex = 0;
         end
         
         function est = estimate(obj, imu, t)
