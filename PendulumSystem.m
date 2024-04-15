@@ -82,7 +82,7 @@ classdef PendulumSystem < handle
             obj.x_est = obj.initcons;
             single_step = odeset('InitialStep', obj.dt);
             
-            obj.P = eye(2) * 0.1^2;
+            obj.P = [50^2, 0; 0, 1^2] % Uncertainty in starting vals
             obj.R = deg2rad(5)^2;
             
             obj.initAnimation();
@@ -178,8 +178,78 @@ classdef PendulumSystem < handle
             obj.P = (eye(2) - K * H) * p_est;
         end
         
+        
+        function y = readSensor(obj, t, reading)
+            arguments
+                obj
+                t double
+                reading double
+            end
+            y = double.empty();
+            if (mod(t,obj.sensor.sampleTime) == 0)
+                noise = randn(1,1)*obj.sensor.noise;
+                y = noise+reading;
+                obj.addMeasurement(t, y);
+            end
+        end
+        function addMeasurement(obj, t, y)
+            arguments
+                obj
+                t double
+                y double
+            end
+            idx = obj.sensor.numMeasurements + 1;
+            if(idx > size(obj.sensor.measurements, 2))
+                obj.sensor.measurements = cat(2, obj.sensor.measurements, zeros(2,64));
+            end
+            obj.sensor.measurements(:,idx) = [t;y];
+            obj.sensor.numMeasurements = idx;
+        end
+        function addCalculation(obj, t, y)
+            arguments
+                obj
+                t double
+                y (2,1) double
+            end
+            idx = obj.trueIndex + 1;
+            if(idx > size(obj.trueRegister, 2))
+                obj.trueRegister = cat(2, obj.trueRegister, zeros(3,512));
+            end
+            obj.trueRegister(:,idx) = [t;y];
+            obj.trueIndex = idx;
+        end
+        function addError(obj, t, y)
+            arguments
+                obj
+                t double
+                y (2,1) double
+            end
+            idx = obj.errIndex + 1;
+            if(idx > size(obj.errRegister, 2))
+                obj.errRegister = cat(2, obj.errRegister, zeros(3,512));
+            end
+            obj.errRegister(:,idx) = [t;y];
+            obj.errIndex = idx;
+        end
+        function addEstimate(obj, t, y, P)
+            arguments
+                obj
+                t double
+                y (2,1) double
+                P (2,2) double
+            end
+            idx = obj.estIndex + 1;
+            if(idx > size(obj.estimateRegister, 2))
+                obj.estimateRegister = cat(2, obj.estimateRegister, zeros(3,512));
+                obj.varRegister = cat(2, obj.varRegister, zeros(3,512));
+            end
+            obj.estimateRegister(:,idx) = [t;y];
+            obj.varRegister(:,idx) = [t;P(1,1);P(2,2)];
+            obj.estIndex = idx;
+        end
+        
         function plot(obj)
-            figure(2);
+            figure(3);
             subplot(2, 1, 1);
             idx = obj.sensor.numMeasurements;
             plot(obj.t, obj.trueRegister(2, :));
@@ -199,6 +269,97 @@ classdef PendulumSystem < handle
             xlabel('Time (s)');
             legend('Measured Velocity', 'Estimated Velocity', 'Actual Velocity');
         end
+        
+        function produceErrorPlots(obj)
+            arguments
+                obj
+            end
+            %     t (1,:) double
+            %     e (3,:) double % Error matrix with row 1 as xerr, row 2 as yerr and row 3 as herr
+            %     std_devs (3,:) double % std_dev matrix with row 1 as x_std, row 2 as y_std and row 3 as h_std
+            % end
+            t = obj.errRegister(1,:);
+            e = obj.errRegister(2:3,:);
+            std_devs = obj.varRegister(2:3, :);
+            
+            finalIdx = length(t);
+            
+            x = t(1,1:finalIdx);
+            y1 = e(1,1:finalIdx);
+            std1 = std_devs(1,1:finalIdx);
+            
+            y2 = e(2,1:finalIdx);
+            std2 = std_devs(2,1:finalIdx);
+            
+            colours = ["#3154b5","#0aeff7","#2fe053", "#000000"];
+            
+            % Create a new figure
+            fig = figure(2);
+            title('Error Plots');
+            screenSize = get(groot, 'ScreenSize');
+            figWidth = 600; % Adjust the width of the figure as needed
+            figHeight = 500; % Adjust the height of the figure as needed
+            figPosX = (screenSize(3) - figWidth) / 2;
+            figPosY = (screenSize(4) - figHeight) / 2;
+            set(fig, 'Position', [figPosX, figPosY, figWidth, figHeight]);
+            ybounds1 = [-1, 1];
+            ybounds2 = [-10, 10];
+            xbounds = [0, t(end)];
+            
+            
+            % Create the first subplot
+            ax1 = subplot(2,1,1);
+            tline1 = "Error and Standard Deviation in \phi";
+            [probs, max, avg] = platform.getSTDinfo(y1, std1); p = probs*100; p = round(p);
+            tline2 = sprintf('Within: 1\\sigma - %i%%, 2\\sigma - %i%%, 3\\sigma - %i%%',p(1), p(2), p(3));
+            tline3 = sprintf('Max: %.2f, Average: %.2f', max, avg);
+            plot(ax1, x, y1, "Color", colours(1), "LineWidth", 3);
+            hold(ax1, "on");
+            plot(ax1, x, std1, "Color", colours(2));
+            plot(ax1, x, -std1, "Color", colours(2));
+            plot(ax1, x, 2*std1, "Color", colours(3));
+            plot(ax1, x, -2*std1, "Color", colours(3));
+            plot(ax1, x, 3*std1, "Color", colours(4));
+            plot(ax1, x, -3*std1, "Color", colours(4));
+            hold(ax1, "off");
+            
+            xlim(ax1, xbounds);
+            ylim(ax1, [-4*max, 4*max]);
+            
+            title([tline1, append(tline2, ', ', tline3)]);
+            xlabel('t, seconds');
+            ylabel('Err $\phi$','interpreter','latex')
+            
+            % Create the second subplot
+            ax2 = subplot(2,1,2);
+            tline1 = "Error and Standard Deviation in \omega";
+            [probs, max, avg] = platform.getSTDinfo(y2, std2); p = probs*100; p = round(p);
+            tline2 = sprintf('Within: 1\\sigma - %i%%, 2\\sigma - %i%%, 3\\sigma - %i%%',p(1), p(2), p(3));
+            tline3 = sprintf('Max: %.2f, Average: %.2f', max, avg);
+            plot(ax2, x, y2, "Color", colours(1), "LineWidth", 3);
+            hold(ax2, "on");
+            plot(ax2, x, std2, "Color", colours(2));
+            plot(ax2, x, -std2, "Color", colours(2));
+            plot(ax2, x, 2*std2, "Color", colours(3));
+            plot(ax2, x, -2*std2, "Color", colours(3));
+            plot(ax2, x, 3*std2, "Color", colours(4));
+            plot(ax2, x, -3*std2, "Color", colours(4));
+            hold(ax2, "off");
+            
+            xlim(ax2, xbounds);
+            ylim(ax2, [-4*max, 4*max]);
+            
+            title([tline1, append(tline2, ', ', tline3)]);
+            xlabel('t, seconds');
+            ylabel('Err $\dot{\phi}$','interpreter','latex')
+            
+            
+        end
+        
+        
+    end
+    methods (Access = private)
+        %% Plotting Functions
         
         function initAnimation(obj)
             %init animation objects
@@ -339,77 +500,6 @@ classdef PendulumSystem < handle
             
         end
         
-        function y = readSensor(obj, t, reading)
-            arguments
-                obj
-                t double
-                reading double
-            end
-            y = double.empty();
-            if (mod(t,obj.sensor.sampleTime) == 0)
-                noise = randn(1,1)*obj.sensor.noise;
-                y = noise+reading;
-                obj.addMeasurement(t, y);
-            end
-        end
-        function addMeasurement(obj, t, y)
-            arguments
-                obj
-                t double
-                y double
-            end
-            idx = obj.sensor.numMeasurements + 1;
-            if(idx > size(obj.sensor.measurements, 2))
-                obj.sensor.measurements = cat(2, obj.sensor.measurements, zeros(2,64));
-            end
-            obj.sensor.measurements(:,idx) = [t;y];
-            obj.sensor.numMeasurements = idx;
-        end
-        function addCalculation(obj, t, y)
-            arguments
-                obj
-                t double
-                y (2,1) double
-            end
-            idx = obj.trueIndex + 1;
-            if(idx > size(obj.trueRegister, 2))
-                obj.trueRegister = cat(2, obj.trueRegister, zeros(3,512));
-            end
-            obj.trueRegister(:,idx) = [t;y];
-            obj.trueIndex = idx;
-        end
-        function addError(obj, t, y)
-            arguments
-                obj
-                t double
-                y (2,1) double
-            end
-            idx = obj.errIndex + 1;
-            if(idx > size(obj.errRegister, 2))
-                obj.errRegister = cat(2, obj.errRegister, zeros(3,512));
-            end
-            obj.errRegister(:,idx) = [t;y];
-            obj.errIndex = idx;
-        end
-        function addEstimate(obj, t, y, P)
-            arguments
-                obj
-                t double
-                y (2,1) double
-                P (2,2) double
-            end
-            idx = obj.estIndex + 1;
-            if(idx > size(obj.estimateRegister, 2))
-                obj.estimateRegister = cat(2, obj.estimateRegister, zeros(3,512));
-                obj.varRegister = cat(2, obj.varRegister, zeros(3,512));
-            end
-            obj.estimateRegister(:,idx) = [t;y];
-            obj.varRegister(:,idx) = [t;P(1,1);P(2,2)];
-            obj.estIndex = idx;
-        end
-        
-    end
-    methods (Access = private)
     end
     methods (Static)
         function [t, y] = RK4(func, tCurr, yCurr, step_size)
@@ -423,6 +513,5 @@ classdef PendulumSystem < handle
             y = yCurr + (k1 + 2*k2 + 2*k3 + k4) / 6;
             t = tCurr + step_size;
         end
-        
     end
 end
